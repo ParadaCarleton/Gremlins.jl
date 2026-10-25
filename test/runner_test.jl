@@ -426,3 +426,12 @@ end
     @test 5 ∉ Gremlins.statement_coverage(source, Set([1]), Set([1, 4]))
     @test 5 in Gremlins.statement_coverage(source, Set([1, 4]), Set([1, 4]))
 end
+
+@testset "_run_with_timeout — a child killed by a signal has a nonzero exit code" begin
+    julia = Gremlins._julia_exe()
+    crash = Cmd([julia, "--startup-file=no", "-e", "unsafe_load(Ptr{Int}(0))"])
+    exit_code, _ = Gremlins._run_with_timeout(crash, 120.0)
+    @test exit_code == 128 + 11
+    clean = Cmd([julia, "--startup-file=no", "-e", "exit(0)"])
+    @test first(Gremlins._run_with_timeout(clean, 120.0)) == 0
+end
