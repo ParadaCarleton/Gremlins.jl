@@ -82,41 +82,54 @@ function executable_lines(path::AbstractString)::Set{Int}
     return executable
 end
 
-"""
-    statement_start_lines(source) -> Dict{Int, Int}
+"""Whether `node` defines a function, in long (`function f() end`) or short (`f() = x`) form."""
+function is_definition(node::JuliaSyntax.SyntaxNode)::Bool
+    JuliaSyntax.kind(node) == JuliaSyntax.K"function" && return true
+    JuliaSyntax.kind(node) == JuliaSyntax.K"=" || return false
+    target = first(JuliaSyntax.children(node))
+    while JuliaSyntax.kind(target) in (JuliaSyntax.K"::", JuliaSyntax.K"where")
+        target = first(JuliaSyntax.children(target))
+    end
+    return JuliaSyntax.kind(target) == JuliaSyntax.K"call"
+end
 
-Maps each line to the first line of the innermost statement (a child of a block or the top
-level) that contains it. Julia attributes coverage to a statement's first line only, so the
-continuation lines of a multi-line call or expression never appear in a `.cov` file.
 """
-function statement_start_lines(source::AbstractString)::Dict{Int, Int}
-    starts = Dict{Int, Int}()
+    statement_spans(source) -> Dict{Int, UnitRange{Int}}
+
+Maps each line to the line range of the innermost statement that contains it: a child of a block
+or the top level. A struct's fields belong to the struct; only its inner constructors are statements.
+"""
+function statement_spans(source::AbstractString)::Dict{Int, UnitRange{Int}}
+    spans = Dict{Int, UnitRange{Int}}()
     tree = JuliaSyntax.parseall(JuliaSyntax.SyntaxNode, source; ignore_errors = true)
-    visit!(node::JuliaSyntax.SyntaxNode, in_block::Bool) = begin
+    visit!(node::JuliaSyntax.SyntaxNode, statement::Bool, in_struct::Bool) = begin
         range = JuliaSyntax.byte_range(node)
-        if in_block && !isempty(range)
+        if statement && !isempty(range)
             first_line = first(JuliaSyntax.source_location(node.source, first(range)))
             last_line = first(JuliaSyntax.source_location(node.source, last(range)))
             for line in first_line:last_line
-                starts[line] = first_line
+                spans[line] = first_line:last_line
             end
         end
         children = JuliaSyntax.children(node)
         children === nothing && return
-        block = JuliaSyntax.kind(node) in (JuliaSyntax.K"block", JuliaSyntax.K"toplevel")
+        kind = JuliaSyntax.kind(node)
+        block = kind in (JuliaSyntax.K"block", JuliaSyntax.K"toplevel")
+        struct_body = block && in_struct
         for child in children
-            visit!(child, block)
+            visit!(child, block && (!struct_body || is_definition(child)), kind == JuliaSyntax.K"struct")
         end
     end
-    visit!(tree, false)
-    return starts
+    visit!(tree, false, false)
+    return spans
 end
 
 """
     statement_coverage(source, covered, executable) -> Set{Int}
 
-`covered` plus every non-executable line whose innermost statement starts on a covered line.
-A line inside an unrun statement stays uncovered, and so does an executable line with count 0.
+`covered` plus every non-executable line whose innermost statement has a covered line. Julia counts a
+statement on one of its lines (a call on its first, a function on its body, a struct on its header), so the
+others never appear in a `.cov` file. A line of an unrun statement, or an executable line with count 0, stays uncovered.
 """
 function statement_coverage(
     source::AbstractString,
@@ -124,8 +137,8 @@ function statement_coverage(
     executable::Set{Int},
 )::Set{Int}
     expanded = copy(covered)
-    for (line, start) in statement_start_lines(source)
-        if line ∉ executable && start in covered
+    for (line, span) in statement_spans(source)
+        if line ∉ executable && any(in(covered), span)
             push!(expanded, line)
         end
     end
