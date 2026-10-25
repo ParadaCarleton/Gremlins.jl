@@ -31,7 +31,7 @@ end
 
 function Base.show(io::IO, cm::CoverageMap)
     n_files = length(cm.data)
-    n_lines = sum(length(v) for v in values(cm.data); init=0)
+    n_lines = sum(length(v) for v in values(cm.data); init = 0)
     print(io, "CoverageMap($n_files files, $n_lines covered lines)")
 end
 
@@ -66,6 +66,72 @@ function parse_cov_file(path::AbstractString)::Set{Int}
     return covered
 end
 
+"""
+    executable_lines(path) -> Set{Int}
+
+The lines a Julia `.cov` file marks executable (a count, including zero).
+"""
+function executable_lines(path::AbstractString)::Set{Int}
+    executable = Set{Int}()
+    for (i, line) in enumerate(readlines(path))
+        m = match(r"^\s+(-|\d+)\s", line)
+        if m !== nothing && m.captures[1] != "-"
+            push!(executable, i)
+        end
+    end
+    return executable
+end
+
+"""
+    statement_start_lines(source) -> Dict{Int, Int}
+
+Maps each line to the first line of the innermost statement (a child of a block or the top
+level) that contains it. Julia attributes coverage to a statement's first line only, so the
+continuation lines of a multi-line call or expression never appear in a `.cov` file.
+"""
+function statement_start_lines(source::AbstractString)::Dict{Int, Int}
+    starts = Dict{Int, Int}()
+    tree = JuliaSyntax.parseall(JuliaSyntax.SyntaxNode, source; ignore_errors = true)
+    visit!(node::JuliaSyntax.SyntaxNode, in_block::Bool) = begin
+        range = JuliaSyntax.byte_range(node)
+        if in_block && !isempty(range)
+            first_line = first(JuliaSyntax.source_location(node.source, first(range)))
+            last_line = first(JuliaSyntax.source_location(node.source, last(range)))
+            for line in first_line:last_line
+                starts[line] = first_line
+            end
+        end
+        children = JuliaSyntax.children(node)
+        children === nothing && return
+        block = JuliaSyntax.kind(node) in (JuliaSyntax.K"block", JuliaSyntax.K"toplevel")
+        for child in children
+            visit!(child, block)
+        end
+    end
+    visit!(tree, false)
+    return starts
+end
+
+"""
+    statement_coverage(source, covered, executable) -> Set{Int}
+
+`covered` plus every non-executable line whose innermost statement starts on a covered line.
+A line inside an unrun statement stays uncovered, and so does an executable line with count 0.
+"""
+function statement_coverage(
+    source::AbstractString,
+    covered::Set{Int},
+    executable::Set{Int},
+)::Set{Int}
+    expanded = copy(covered)
+    for (line, start) in statement_start_lines(source)
+        if line ∉ executable && start in covered
+            push!(expanded, line)
+        end
+    end
+    return expanded
+end
+
 # ─── Baseline run ─────────────────────────────────────────────────────────────
 
 """
@@ -95,9 +161,8 @@ function baseline_run(
 )::Tuple{Float64, CoverageMap}
     pkgdir = abspath(pkgdir)
     test_path = joinpath(pkgdir, test_dir, test_file)
-    isfile(test_path) || throw(MutationError(
-        "baseline_run: test file not found: '$test_path'"
-    ))
+    isfile(test_path) ||
+        throw(MutationError("baseline_run: test file not found: '$test_path'"))
 
     # Create shadow copy — real tree is never written (I1 crash-safety)
     shadow = _make_shadow(pkgdir)
@@ -118,23 +183,24 @@ function baseline_run(
         if exit_code == :timeout
             throw(MutationError(
                 "baseline_run: test suite timed out after $(timeout)s — " *
-                "cannot establish baseline; raise `baseline_timeout` on mutate()"
+                    "cannot establish baseline; raise `baseline_timeout` on mutate()",
             ))
         end
         if exit_code != 0
             # Detect Pkg resolution failures in the shadow
-            if occursin("PkgError", output) || occursin("could not find", output) ||
-               occursin("manifest", lowercase(output))
+            if occursin("PkgError", output) ||
+                    occursin("could not find", output) ||
+                    occursin("manifest", lowercase(output))
                 throw(MutationError(
                     "baseline_run: Pkg resolution failed in shadow copy — " *
-                    "your Manifest.toml may use relative paths that do not resolve outside the real package directory. " *
-                    "Check your [deps] or Manifest.toml for relative path references. " *
-                    "Output: $(output[1:min(500,length(output))])"
+                        "your Manifest.toml may use relative paths that do not resolve outside the real package directory. " *
+                        "Check your [deps] or Manifest.toml for relative path references. " *
+                        "Output: $(output[1:min(500, length(output))])",
                 ))
             end
             throw(MutationError(
                 "baseline_run: test suite failed with exit code $exit_code — " *
-                "fix tests before running mutation testing"
+                    "fix tests before running mutation testing",
             ))
         end
 
@@ -143,7 +209,7 @@ function baseline_run(
         cmap = _remap_cmap_to_real(shadow_cmap, pkgdir, shadow)
         return (elapsed, cmap)
     finally
-        rm(shadow; recursive=true, force=true)
+        rm(shadow; recursive = true, force = true)
     end
 end
 
@@ -180,6 +246,17 @@ function _collect_coverage(pkgdir::AbstractString)::CoverageMap
             catch
                 Set{Int}()
             end
+            if !isempty(covered) && isfile(src_path)
+                covered = try
+                    statement_coverage(
+                        read(src_path, String),
+                        covered,
+                        executable_lines(cov_path),
+                    )
+                catch
+                    covered
+                end
+            end
 
             if !isempty(covered)
                 existing = get(data, rel, Set{Int}())
@@ -215,7 +292,10 @@ function _remap_cmap_to_real(
         # shadow_rel is already relative to shadow_dir with forward slashes.
         # The real package has the same directory structure, so real_rel == shadow_rel.
         # We recompute via joinpath/relpath to be robust.
-        real_abs = joinpath(pkgdir, replace(shadow_rel, "/" => Base.Filesystem.path_separator))
+        real_abs = joinpath(
+            pkgdir,
+            replace(shadow_rel, "/" => Base.Filesystem.path_separator),
+        )
         real_rel = replace(relpath(real_abs, pkgdir), Base.Filesystem.path_separator => "/")
         existing = get(new_data, real_rel, Set{Int}())
         new_data[real_rel] = union(existing, lines)
@@ -264,7 +344,7 @@ safety but not returned in full (runner classifies by exit code, not output).
 function _run_with_timeout(cmd::Cmd, timeout_secs::Float64)::Tuple{Any, String}
     buf = IOBuffer()
     proc = try
-        run(pipeline(cmd, stdout=buf, stderr=buf); wait=false)
+        run(pipeline(cmd, stdout = buf, stderr = buf); wait = false)
     catch e
         return (-1, "launch error: $e")
     end
@@ -272,10 +352,16 @@ function _run_with_timeout(cmd::Cmd, timeout_secs::Float64)::Tuple{Any, String}
     deadline = time() + timeout_secs
     while process_running(proc)
         if time() > deadline
-            try; kill(proc, Base.SIGTERM); catch; end
+            try
+                kill(proc, Base.SIGTERM)
+            catch
+            end
             sleep(0.5)
             if process_running(proc)
-                try; kill(proc, Base.SIGKILL); catch; end
+                try
+                    kill(proc, Base.SIGKILL)
+                catch
+                end
             end
             wait(proc)
             return (:timeout, "")
