@@ -118,7 +118,7 @@ export schema_warm_agreement
 
 # Warm-worker pool (M2)
 export FallbackReason
-export warm_ok, fallback_macro, fallback_typedef, fallback_const, fallback_evalerr, fallback_schema_ineligible
+export warm_ok, fallback_macro, fallback_typedef, fallback_const, fallback_evalerr, fallback_schema_ineligible, fallback_toplevel_delete
 export WarmEligibility
 export WarmMutantResult
 export WarmRunResult

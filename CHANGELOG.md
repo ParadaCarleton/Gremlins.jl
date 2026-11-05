@@ -3,6 +3,11 @@
 Notable changes per release. Format follows [Keep a Changelog](https://keepachangelog.com);
 versions follow Julia 0.x semver (a minor bump is the breaking slot).
 
+## [Unreleased]
+
+### Fixed
+- Warm mode reported a `stmt_delete` of a module-level statement (a whole function, a `const`) as survived when a fresh process killed it: re-evaluating the mutated module body leaves the deleted definition in the live module. Such mutants run cold, under the new `fallback_toplevel_delete` taxonomy reason.
+
 ## [0.4.0] - 2026-06-19
 
 ### Added

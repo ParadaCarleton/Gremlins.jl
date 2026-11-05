@@ -17,6 +17,11 @@ Values:
 - `fallback_typedef`  — site is inside struct/abstract/primitive type def (static)
 - `fallback_const`    — site is inside a const global assignment (static)
 - `fallback_evalerr`  — warm eval threw an exception (dynamic)
+- `fallback_schema_ineligible` — schema mode could not instrument the site
+- `fallback_toplevel_delete` — the mutant deletes a module-level statement (static).
+  Warm evaluation re-evaluates what the mutated module body still holds, so a
+  deleted definition keeps its old method (or binding) in the live module and the
+  deletion never takes effect.
 """
 @enum FallbackReason begin
     warm_ok
@@ -25,6 +30,7 @@ Values:
     fallback_const
     fallback_evalerr
     fallback_schema_ineligible
+    fallback_toplevel_delete
 end
 
 # ─── Warm eligibility ─────────────────────────────────────────────────────────
@@ -76,6 +82,10 @@ function classify_warm_eligibility(site::MutationSite, pkgdir::AbstractString)::
     node = _find_node_at_byte(tree, target_byte, src)
     node === nothing && return WarmEligibility(true, warm_ok)
 
+    if site.op_id == :stmt_delete && _deletes_module_statement(tree, site.byte_range)
+        return WarmEligibility(false, fallback_toplevel_delete)
+    end
+
     reason = _check_ancestry(node)
     return WarmEligibility(reason == warm_ok, reason)
 end
@@ -104,6 +114,41 @@ function _check_ancestry(node::JuliaSyntax.SyntaxNode)::FallbackReason
         p = p.parent
     end
     return warm_ok
+end
+
+"""
+    _deletes_module_statement(tree, byte_range) -> Bool
+
+Whether the statement spanning exactly `byte_range` is a direct child of a module
+body (or of the file). Deleting such a statement cannot run warm: re-evaluating the
+mutated module body leaves the deleted definition in place.
+"""
+function _deletes_module_statement(tree::JuliaSyntax.SyntaxNode, byte_range::UnitRange{Int})::Bool
+    node = _find_node_spanning(tree, byte_range)
+    node === nothing && return false
+    parent = node.parent
+    parent === nothing && return false
+    kind = JuliaSyntax.kind(parent)
+    kind == JuliaSyntax.K"toplevel" && return true
+    return kind == JuliaSyntax.K"block" && !isnothing(parent.parent) &&
+        JuliaSyntax.kind(parent.parent) == JuliaSyntax.K"module"
+end
+
+"""The outermost node whose byte range is exactly `byte_range`, or `nothing`."""
+function _find_node_spanning(
+    root::JuliaSyntax.SyntaxNode,
+    byte_range::UnitRange{Int},
+)::Union{JuliaSyntax.SyntaxNode, Nothing}
+    br = JuliaSyntax.byte_range(root)
+    br == byte_range && return root
+    (first(br) <= first(byte_range) && last(byte_range) <= last(br)) || return nothing
+    cs = JuliaSyntax.children(root)
+    isnothing(cs) && return nothing
+    for child in cs
+        found = _find_node_spanning(child, byte_range)
+        found !== nothing && return found
+    end
+    return nothing
 end
 
 """
