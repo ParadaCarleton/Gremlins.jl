@@ -10,8 +10,15 @@ Pkg = "44cfe95a-1eb2-52ea-b672-e2afdf69b78f"
 SHA = "ea8e919c-243c-51af-8825-aaa63cd721ce"
 TOML = "fa267f1f-6049-4f14-aa54-33bafae1ed76"
 
+[weakdeps]
+Fallout = "274ebb9d-e75a-429a-8580-dde01b904bae"
+
+[extensions]
+GremlinsFalloutExt = "Fallout"
+
 [compat]
 Base64 = "1"
+Fallout = "0.4.1"
 JuliaSyntax = "0.4, 1"
 Pkg = "1"
 SHA = "0.7.0"

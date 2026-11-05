@@ -3,6 +3,17 @@
 Notable changes per release. Format follows [Keep a Changelog](https://keepachangelog.com);
 versions follow Julia 0.x semver (a minor bump is the breaking slot).
 
+## [Unreleased]
+
+### Added
+- Test selection with [Fallout.jl](https://github.com/ParadaCarleton/Fallout.jl) (package extension, `using Fallout`): `fallout_selector(pkgdir)` and `selector=` on `mutate`/`mutate_warm` run each mutant against only the testsets Fallout selects for its edit; a mutant no testset reaches is `no_coverage` without running; the baseline runs only the testsets pending mutants need.
+- Verdict reuse across runs: `.gremlins_results.toml` keeps each killed/survived/no-coverage verdict with its testsets and a git snapshot of the tree; a later run reuses it while the statement is unchanged and Fallout finds none of its testsets affected since. Cold runs reuse only cold verdicts; warm verdicts contradicted by I4 are not stored.
+- CLI `--fallout`, `--fallout-map <map>`, `--fresh`.
+- `TestSelector` interface, `plan_tests`/`TestPlan`, `plan=` on `run_mutations`/`run_mutations_warm`, `test_args=` on `baseline_run`; the warm worker sets the test script's `ARGS` per mutant.
+
+### Fixed
+- The warm worker ran test scripts with `ARGS == ["<PkgName>"]` (its own arguments); it runs them with empty `ARGS`, as the cold path does, or with the mutant's runner arguments under a test plan.
+
 ## [0.4.0] - 2026-06-19
 
 ### Added

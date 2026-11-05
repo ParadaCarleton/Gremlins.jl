@@ -149,10 +149,12 @@ end
 
 """
     baseline_run(pkgdir; test_dir="test", test_file="runtests.jl",
-                 timeout=600.0) -> (elapsed::Float64, CoverageMap)
+                 test_args=String[], timeout=600.0) -> (elapsed::Float64, CoverageMap)
 
 Run the package's test suite once with `--code-coverage=user` to build
 the coverage map. Returns elapsed time in seconds and a `CoverageMap`.
+`test_args` are passed to the test script (a selected run passes the runner
+the testsets its mutants run).
 
 The test command is: `julia --project=<shadow> --code-coverage=user <shadow_test_file>`
 
@@ -170,6 +172,7 @@ function baseline_run(
     pkgdir::AbstractString;
     test_dir::AbstractString = "test",
     test_file::AbstractString = "runtests.jl",
+    test_args::Vector{String} = String[],
     timeout::Float64 = 600.0,
 )::Tuple{Float64, CoverageMap}
     pkgdir = abspath(pkgdir)
@@ -187,7 +190,7 @@ function baseline_run(
         shadow_test_path = joinpath(shadow, test_dir, test_file)
 
         jl = _julia_exe()
-        cmd = Cmd([jl, "--startup-file=no", "--project=$shadow", "--code-coverage=user", shadow_test_path])
+        cmd = Cmd([jl, "--startup-file=no", "--project=$shadow", "--code-coverage=user", shadow_test_path, test_args...])
 
         t0 = time()
         exit_code, output = _run_with_timeout(cmd, timeout)

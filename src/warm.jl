@@ -111,6 +111,11 @@ elapsed time (default 2.5). Used to estimate plain-run time for the per-mutant
 timeout. See run_mutations for full rationale.
 
 `mutant_timeout`: explicit per-mutant timeout override. Bypasses derivation.
+
+`plan`: a `TestPlan` (see `plan_tests`). Each mutant then runs the plan's runner
+(its `_warm.jl` variant on the warm path, when one exists) with only the testsets
+that can detect it, warm and cold alike; a mutant the plan gives no testset is
+`no_coverage` without running.
 """
 function run_mutations_warm(
     pkgdir::AbstractString,
@@ -125,8 +130,10 @@ function run_mutations_warm(
     verbose::Bool                = false,
     cache::Union{MutantCache, Nothing} = nothing,
     pkg_name::Union{String, Nothing} = nothing,
+    plan::Union{TestPlan, Nothing} = nothing,
 )::WarmRunResult
     pkgdir = abspath(pkgdir)
+    test_relpath = plan_test_relpath(plan, test_dir, test_file)
 
     # Infer package name from Project.toml if not provided
     if isnothing(pkg_name)
@@ -162,7 +169,7 @@ function run_mutations_warm(
     sorted_sites = sort(sites, by = s -> s.id)
 
     # Determine warm test file (prefer _warm.jl variant)
-    warm_test_path = _find_warm_test_file(pkgdir, test_dir, test_file)
+    warm_test_path = _find_warm_test_file(pkgdir, dirname(test_relpath), basename(test_relpath))
     verbose && println("[gremlins/warm] Warm test : $warm_test_path")
 
     warm_results   = WarmMutantResult[]
@@ -180,7 +187,7 @@ function run_mutations_warm(
     # No-op (returns false) when the package has no non-stdlib test deps.
     _augment_shadow_with_test_deps(pkgdir, shadow)
 
-    shadow_test_path = joinpath(shadow, test_dir, test_file)
+    shadow_test_path = joinpath(shadow, test_relpath)
 
     # Start worker
     worker = nothing
@@ -195,8 +202,8 @@ function run_mutations_warm(
 
     try
         for (i, site) in enumerate(sorted_sites)
-            # Coverage check
-            if !is_covered(cmap, site)
+            # Coverage check (line coverage, then the plan's testsets)
+            if !is_covered(cmap, site) || unreachable(plan, site)
                 if verbose
                     println("[gremlins/warm] [$i/$(length(sorted_sites))] $(site.id[1:8])… no_coverage")
                     flush(stdout)
@@ -235,7 +242,8 @@ function run_mutations_warm(
                     println("[gremlins/warm] [$i/$(length(sorted_sites))] $(site.id[1:8])… cold ($(elig.reason))")
                     flush(stdout)
                 end
-                cold_outcome, cold_elapsed, cold_err = _run_cold_single(site, pkgdir, shadow, shadow_test_path, derived_timeout)
+                cold_outcome, cold_elapsed, cold_err = _run_cold_single(site, pkgdir, shadow, shadow_test_path, derived_timeout;
+                    args=plan_arguments(plan, site))
                 base = MutantResult(site, cold_outcome, cold_elapsed, cold_err)
                 wr = WarmMutantResult(base, elig.reason, 0.0)
                 push!(warm_results, wr)
@@ -301,7 +309,8 @@ function run_mutations_warm(
                 end
 
                 outcome, warm_elapsed, errmsg, fallback_r = _run_mutant_via_worker(
-                    worker, abs_path, mutated_content, src_content, site, warm_test_path, derived_timeout
+                    worker, abs_path, mutated_content, src_content, site, warm_test_path, derived_timeout;
+                    args=plan_arguments(plan, site),
                 )
 
                 if fallback_r == fallback_evalerr
@@ -320,7 +329,8 @@ function run_mutations_warm(
                             verbose && println("[gremlins/warm] WARNING: worker re-spawn after fallback failed")
                         end
                     end
-                    cold_outcome, cold_elapsed, cold_err = _run_cold_single(site, pkgdir, shadow, shadow_test_path, derived_timeout)
+                    cold_outcome, cold_elapsed, cold_err = _run_cold_single(site, pkgdir, shadow, shadow_test_path, derived_timeout;
+                        args=plan_arguments(plan, site))
                     base = MutantResult(site, cold_outcome, cold_elapsed, cold_err)
                     wr = WarmMutantResult(base, fallback_evalerr, 0.0)
                     push!(warm_results, wr)
@@ -357,7 +367,8 @@ function run_mutations_warm(
                     print("[gremlins/warm] [$i/$(length(sorted_sites))] $(site.id[1:8])… cold (no_worker) ")
                     flush(stdout)
                 end
-                cold_outcome, cold_elapsed, cold_err = _run_cold_single(site, pkgdir, shadow, shadow_test_path, derived_timeout)
+                cold_outcome, cold_elapsed, cold_err = _run_cold_single(site, pkgdir, shadow, shadow_test_path, derived_timeout;
+                    args=plan_arguments(plan, site))
                 base = MutantResult(site, cold_outcome, cold_elapsed, cold_err)
                 wr = WarmMutantResult(base, fallback_evalerr, 0.0)
                 push!(warm_results, wr)
@@ -391,7 +402,8 @@ function run_mutations_warm(
         for wr in sample
             site = wr.base.site
             cold_outcome2, _, _ = try
-                _run_cold_single(site, pkgdir, shadow, shadow_test_path, derived_timeout)
+                _run_cold_single(site, pkgdir, shadow, shadow_test_path, derived_timeout;
+                    args=plan_arguments(plan, site))
             catch
                 continue
             end
@@ -434,14 +446,16 @@ Run one mutant on the cold path, returning (outcome, elapsed, errmsg).
 `shadow_dir`: disposable shadow copy of pkgdir (created once by the caller).
 Mutations are applied to the shadow file; the real tree is never touched (I1).
 In-shadow revert after each mutant keeps the shadow valid for the next call.
-`shadow_test_path`: test file path inside the shadow.
+`shadow_test_path`: test file path inside the shadow. `args`: its arguments
+(the testsets a test plan selects; empty runs the whole suite).
 """
 function _run_cold_single(
     site::MutationSite,
     pkgdir::AbstractString,
     shadow_dir::AbstractString,
     shadow_test_path::AbstractString,
-    timeout_secs::Float64,
+    timeout_secs::Float64;
+    args::Vector{String} = String[],
 )::Tuple{MutantOutcome, Float64, String}
     real_abs_path = try
         _find_abs_path_or_throw(pkgdir, site)
@@ -468,7 +482,7 @@ function _run_cold_single(
     try
         apply!(site, shadow_abs_path)
         jl = _julia_exe()
-        cmd = Cmd([jl, "--startup-file=no", "--project=$shadow_dir", shadow_test_path])
+        cmd = Cmd([jl, "--startup-file=no", "--project=$shadow_dir", shadow_test_path, args...])
         exit_code, _ = _run_with_timeout(cmd, timeout_secs)
 
         outcome = if exit_code == :timeout
@@ -572,6 +586,11 @@ elapsed time (default 2.5). Used to estimate plain-run time for mutant timeouts.
 
 `files`: restrict to sites whose relpath matches any entry (same normalization as
 CLI `--files`: strips leading `./`, backslash→slash, basename or suffix match).
+
+`selector`: a `TestSelector` (e.g. `fallout_selector(pkgdir)`, after `using Fallout`);
+see `mutate`. With a selector the stored outcomes of `.gremlins_results.toml` take the
+place of the file-hash cache (`use_cache` is ignored): a file-hash entry knows neither
+which tests produced it nor whether they changed.
 """
 function mutate_warm(
     pkgdir::AbstractString;
@@ -588,6 +607,9 @@ function mutate_warm(
     verbose::Bool                 = false,
     use_cache::Bool               = true,
     pkg_name::Union{String, Nothing} = nothing,
+    selector::Union{TestSelector, Nothing} = nothing,
+    reuse::Bool                   = true,
+    fresh::Bool                   = false,
 )::WarmRunResult
     pkgdir = abspath(pkgdir)
     verbose && println("[gremlins/warm] Discovering mutations in $(joinpath(pkgdir, src_dir))...")
@@ -605,6 +627,28 @@ function mutate_warm(
     if !isnothing(max_mutants) && length(sites) > max_mutants
         sites = _sample_sites_round_robin(sites, max_mutants)
         verbose && println("[gremlins/warm] Capped to $(length(sites)) sites (max_mutants=$max_mutants)")
+    end
+
+    if !isnothing(selector)
+        prepared = prepare_selected_run(pkgdir, sites, selector; warm=true, reuse=reuse, fresh=fresh, verbose=verbose)
+        verbose && println("[gremlins/warm] Running baseline on the selected testsets...")
+        baseline_elapsed, cmap = selected_baseline(prepared; timeout=baseline_timeout)
+        verbose && println("[gremlins/warm] Baseline: $(round(baseline_elapsed, digits=2))s")
+        result = if isempty(prepared.pending)
+            empty_run = RunResult(pkgdir, MutationSite[], MutantResult[], baseline_elapsed, 0.0)
+            WarmRunResult(empty_run, WarmMutantResult[], Dict{FallbackReason, Int}(), 0, String[], 0, 0)
+        else
+            run_mutations_warm(pkgdir, prepared.pending, cmap;
+                baseline_elapsed=baseline_elapsed,
+                timeout_multiplier=timeout_multiplier,
+                coverage_overhead=coverage_overhead,
+                mutant_timeout=mutant_timeout,
+                verbose=verbose,
+                pkg_name=pkg_name,
+                plan=prepared.plan,
+            )
+        end
+        return finish_selected_run(prepared, result)
     end
 
     verbose && println("[gremlins/warm] Running baseline test suite...")

@@ -13,11 +13,13 @@ include("diff_scope.jl")
 include("patch.jl")
 include("shadow.jl")
 include("coverage.jl")
+include("selection.jl")          # TestSelector, TestPlan: per-mutant test selection
 include("runner.jl")
 include("cache.jl")
 include("warm_eligibility.jl")   # FallbackReason, WarmEligibility (used by warm.jl + worker_pool.jl)
 include("worker_pool.jl")        # WorkerHandle + JSON-Lines transport
 include("warm.jl")
+include("reuse.jl")              # ResultStore, SelectedRun: reuse outcomes across runs
 include("schema_instrument.jl")  # instrument_function, disjoint_eligible, _schema_instr_unit
 include("schema_agreement.jl")   # AgreementResult, schema_warm_agreement, _check_agreement
 include("schema.jl")
@@ -115,6 +117,15 @@ export run_mutations_schema
 export SchemaRunResult
 export AgreementResult
 export schema_warm_agreement
+
+# Test selection + result reuse (Fallout integration)
+export TestSelector
+export fallout_selector
+export TestPlan
+export plan_tests
+export ResultStore
+export load_results
+export save_results
 
 # Warm-worker pool (M2)
 export FallbackReason

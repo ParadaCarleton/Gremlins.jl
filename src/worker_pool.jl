@@ -275,7 +275,8 @@ function _run_mutant_via_worker(
     original_content::AbstractString,
     site::MutationSite,
     test_path::AbstractString,
-    timeout_secs::Float64,
+    timeout_secs::Float64;
+    args::Vector{String} = String[],
 )::Tuple{MutantOutcome, Float64, String, FallbackReason}
     handle.alive || return (error, 0.0, "worker not alive", fallback_evalerr)
 
@@ -298,7 +299,12 @@ function _run_mutant_via_worker(
     # send_path may be "(expr@<abs_path>)" for expression-only sends (no module wrapper needed)
     src_esc  = _json_esc(send_path)
     test_esc = _json_esc(test_path)
-    line = "{\"cmd\":\"mutant\",\"src_path\":$src_esc,\"content_b64\":\"$c_b64\",\"orig_b64\":\"$o_b64\",\"test_path\":$test_esc}"
+    line = "{\"cmd\":\"mutant\",\"src_path\":$src_esc,\"content_b64\":\"$c_b64\",\"orig_b64\":\"$o_b64\",\"test_path\":$test_esc"
+    if !isempty(args)
+        # The test script's ARGS while it runs, NUL-separated (a testset regex may hold anything else).
+        line *= ",\"args_b64\":\"$(Base64.base64encode(join(args, '\0')))\""
+    end
+    line *= "}"
 
     t0 = time()
     resp = _send_request(handle, line, timeout_secs + 5.0)  # +5s buffer for comms overhead

@@ -13,6 +13,8 @@
 #   Request (parent → worker):
 #     {"cmd":"ping"}
 #     {"cmd":"mutant","src_path":"<relpath>","content_b64":"<b64>","orig_b64":"<b64>","test_path":"<abs>"}
+#       optional "args_b64":"<b64 of NUL-joined args>" — the test script's ARGS while it runs
+#       (a test plan's runner arguments: the testsets that can detect the mutant)
 #     {"cmd":"exit"}
 #
 #   Response (worker → parent):
@@ -139,11 +141,11 @@ end
 # ─── Per-mutant warm execution ────────────────────────────────────────────────
 
 """
-    _run_one_mutant(pkg_mod, src_path, mutated_content, orig_content, test_path)
+    _run_one_mutant(pkg_mod, src_path, mutated_content, orig_content, test_path, args=String[])
         -> (outcome::String, elapsed::Float64, err::String)
 
-Eval mutated content into pkg_mod, run test_path in fresh module, restore.
-outcome is "killed", "survived", or "error".
+Eval mutated content into pkg_mod, run test_path in fresh module with `ARGS`
+set to `args`, restore. outcome is "killed", "survived", or "error".
 """
 function _run_one_mutant(
     pkg_mod::Module,
@@ -151,6 +153,7 @@ function _run_one_mutant(
     mutated_content::AbstractString,
     orig_content::AbstractString,
     test_path::AbstractString,
+    args::Vector{String} = String[],
 )::Tuple{String, Float64, String}
     t0 = time()
 
@@ -192,6 +195,9 @@ function _run_one_mutant(
         redirect_stdout(stderr)
     catch
     end
+    old_args = copy(ARGS)
+    empty!(ARGS)
+    append!(ARGS, args)
 
     # try/finally ensures restore always runs (step c + stdout restore)
     try
@@ -208,6 +214,8 @@ function _run_one_mutant(
         outcome = "killed"
         err_msg = string(typeof(e))
     finally
+        empty!(ARGS)
+        append!(ARGS, old_args)
         # Restore stdout for JSON protocol output
         try
             redirect_stdout(old_stdout)
@@ -426,8 +434,20 @@ function main()
                 continue
             end
 
+            a_b64 = _extract_str(line, "args_b64")
+            test_args = String[]
+            if a_b64 !== nothing && !isempty(a_b64)
+                try
+                    test_args = split(String(Base64.base64decode(a_b64)), '\0') .|> String
+                catch e
+                    _respond("outcome" => "error", "elapsed" => 0.0,
+                             "err" => "base64 decode args: $e")
+                    continue
+                end
+            end
+
             outcome, elapsed, err_msg = _run_one_mutant(
-                pkg_mod, src_path, mutated_content, orig_content, test_path
+                pkg_mod, src_path, mutated_content, orig_content, test_path, test_args
             )
 
             _respond("outcome" => outcome,

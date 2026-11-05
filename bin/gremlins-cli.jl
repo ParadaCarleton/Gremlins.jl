@@ -5,6 +5,7 @@
 #   julia --project=<gremlins-dir> bin/gremlins-cli.jl \
 #         --pkg <dir> [--files a.jl,b.jl] [--test-file runtests.jl] \
 #         [--warm] [--json out.json] [--strong 0.80] [--acceptable 0.60]
+#         [--fallout | --fallout-map MAP] [--fresh]
 #
 # Exit codes:
 #   0 — strong or acceptable (kill_rate >= acceptable threshold)
@@ -22,6 +23,18 @@ using Gremlins
 # Julia buffers stderr when it is not a TTY (e.g. redirected to a log file), so
 # progress lines stay invisible until the process exits. Flush after each write.
 elog(msg) = (println(stderr, msg); flush(stderr))
+
+# --fallout needs Fallout.jl, whose loading adds Gremlins' Fallout extension. Load it
+# here, at top level, so the extension's methods exist in the world `main` runs in.
+if any(in(("--fallout", "--fallout-map")), ARGS)
+    try
+        @eval using Fallout
+    catch e
+        elog("ERROR: --fallout needs Fallout.jl in the environment Gremlins runs in: " *
+             "julia --project=<gremlins-dir> -e 'using Pkg; Pkg.add(url=\"https://github.com/ParadaCarleton/Fallout.jl\")'  ($e)")
+        exit(2)
+    end
+end
 
 # ─── Arg parsing (pure functions, no external deps) ────────────────────────────
 
@@ -44,6 +57,8 @@ struct ParsedArgs
     max_sites::Int              # 0 = no cap; >0 = take first N sites (deterministic)
     indiff_ref::Union{String, Nothing}  # --in-diff <ref>: scope to diff vs this ref
     parallel::Int               # --parallel N: concurrent mutant execution (cold path only, default 1)
+    fallout_map::Union{String, Nothing}  # --fallout / --fallout-map MAP: select tests with Fallout
+    fresh::Bool                 # --fresh: ignore stored outcomes (still records new ones)
 end
 
 """
@@ -65,6 +80,8 @@ function _parse_args(argv::Vector{String})::ParsedArgs
     max_sites = 0
     indiff_ref = nothing
     parallel = 1
+    fallout_map = nothing
+    fresh = false
 
     i = 1
     while i <= length(argv)
@@ -122,6 +139,14 @@ function _parse_args(argv::Vector{String})::ParsedArgs
             v = tryparse(Int, argv[i])
             (v === nothing || v < 1) && throw(ArgumentError("--parallel must be an integer >= 1"))
             parallel = v
+        elseif arg == "--fallout"
+            fallout_map = something(fallout_map, "test-impact-map.toml")
+        elseif arg == "--fallout-map"
+            i += 1
+            i > length(argv) && throw(ArgumentError("--fallout-map requires a value"))
+            fallout_map = argv[i]
+        elseif arg == "--fresh"
+            fresh = true
         elseif arg == "--help" || arg == "-h"
             _print_usage()
             exit(0)
@@ -134,8 +159,11 @@ function _parse_args(argv::Vector{String})::ParsedArgs
     isempty(pkg) && throw(ArgumentError("--pkg is required"))
     acceptable > strong && throw(ArgumentError("--acceptable must be <= --strong"))
     (warm && schema) && throw(ArgumentError("--warm and --schema are mutually exclusive"))
+    (schema && fallout_map !== nothing) && throw(ArgumentError("--fallout does not support --schema; use --warm"))
+    (fresh && fallout_map === nothing) && throw(ArgumentError("--fresh needs --fallout"))
 
-    return ParsedArgs(pkg, files, test_file, warm, schema, blame, diff, json_out, strong, acceptable, max_sites, indiff_ref, parallel)
+    return ParsedArgs(pkg, files, test_file, warm, schema, blame, diff, json_out, strong, acceptable, max_sites, indiff_ref, parallel,
+                      fallout_map, fresh)
 end
 
 function _print_usage()
@@ -175,6 +203,18 @@ Options:
                        machines; each mutant runs in its own shadow copy so there
                        is no shared state between concurrent runs.
                        (--jobs is accepted as an alias)
+  --fallout            Select tests with Fallout.jl's test impact map
+                       (<pkg>/test-impact-map.toml; built statically when absent).
+                       Each mutant runs only the testsets that can detect it, the
+                       baseline only the testsets some mutant needs, and a mutant
+                       keeps its stored outcome while none of its testsets is
+                       affected by the change since it was recorded
+                       (<pkg>/.gremlins_results.toml). Runs the map's runner, not
+                       --test-file. Needs Fallout.jl in Gremlins' environment, the
+                       package at the root of a git repository, and a runner that
+                       takes a testset regex (see Fallout's README).
+  --fallout-map <map>  As --fallout, with this map (relative to <pkg>)
+  --fresh              With --fallout: run every mutant, ignoring stored outcomes
   --help               Print this message
 
 Band output (always printed to stdout):
@@ -401,10 +441,31 @@ function main(argv::Vector{String})
         exit(2)
     end
 
+    # Test selection (--fallout): plan each mutant's testsets, reuse stored outcomes
+    prepared = nothing
+    plan = nothing
+    if args.fallout_map !== nothing
+        prepared = try
+            selector = Gremlins.fallout_selector(pkgdir; map=args.fallout_map)
+            Gremlins.prepare_selected_run(pkgdir, sites, selector; warm=args.warm, fresh=args.fresh)
+        catch e
+            elog("ERROR: --fallout: $(sprint(showerror, e))")
+            exit(2)
+        end
+        foreach(line -> elog("[gremlins] fallout: $line"), Gremlins.selection_report(prepared))
+        plan = prepared.plan
+        sites = prepared.pending
+    end
+
     # Baseline
-    elog("[gremlins] Running baseline test suite ($(test_dir)/$(test_file_bare))...")
     baseline_elapsed, cmap = try
-        Gremlins.baseline_run(pkgdir; test_dir=test_dir, test_file=test_file_bare)
+        if prepared === nothing
+            elog("[gremlins] Running baseline test suite ($(test_dir)/$(test_file_bare))...")
+            Gremlins.baseline_run(pkgdir; test_dir=test_dir, test_file=test_file_bare)
+        else
+            elog("[gremlins] Running baseline on the selected testsets ($(plan.runner))...")
+            Gremlins.selected_baseline(prepared)
+        end
     catch e
         elog("ERROR: baseline run failed: $e")
         exit(2)
@@ -435,15 +496,30 @@ function main(argv::Vector{String})
     elseif args.warm
         elog("[gremlins] Running warm-pool mutation run...")
         warm_result = try
-            cache = Gremlins.load_cache(pkgdir)
-            wr = Gremlins.run_mutations_warm(pkgdir, sites, cmap;
-                test_dir=test_dir,
-                test_file=test_file_bare,
-                baseline_elapsed=baseline_elapsed,
-                verbose=false,
-                cache=cache)
-            Gremlins.save_cache(cache)
-            wr
+            if prepared === nothing
+                cache = Gremlins.load_cache(pkgdir)
+                wr = Gremlins.run_mutations_warm(pkgdir, sites, cmap;
+                    test_dir=test_dir,
+                    test_file=test_file_bare,
+                    baseline_elapsed=baseline_elapsed,
+                    verbose=false,
+                    cache=cache)
+                Gremlins.save_cache(cache)
+                wr
+            else
+                # Stored outcomes replace the file-hash cache under --fallout.
+                wr = if isempty(sites)
+                    Gremlins.WarmRunResult(
+                        Gremlins.RunResult(pkgdir, Gremlins.MutationSite[], Gremlins.MutantResult[], baseline_elapsed, 0.0),
+                        Gremlins.WarmMutantResult[], Dict{Gremlins.FallbackReason, Int}(), 0, String[], 0, 0)
+                else
+                    Gremlins.run_mutations_warm(pkgdir, sites, cmap;
+                        baseline_elapsed=baseline_elapsed,
+                        verbose=false,
+                        plan=plan)
+                end
+                Gremlins.finish_selected_run(prepared, wr)
+            end
         catch e
             elog("ERROR: warm run failed: $e")
             exit(2)
@@ -464,12 +540,23 @@ function main(argv::Vector{String})
             elog("[gremlins] Running cold mutation run...")
         end
         try
-            Gremlins.run_mutations(pkgdir, sites, cmap;
-                test_dir=test_dir,
-                test_file=test_file_bare,
-                baseline_elapsed=baseline_elapsed,
-                parallel=args.parallel,
-                verbose=false)
+            if prepared === nothing
+                Gremlins.run_mutations(pkgdir, sites, cmap;
+                    test_dir=test_dir,
+                    test_file=test_file_bare,
+                    baseline_elapsed=baseline_elapsed,
+                    parallel=args.parallel,
+                    verbose=false)
+            else
+                ran = isempty(sites) ?
+                    Gremlins.RunResult(pkgdir, Gremlins.MutationSite[], Gremlins.MutantResult[], baseline_elapsed, 0.0) :
+                    Gremlins.run_mutations(pkgdir, sites, cmap;
+                        baseline_elapsed=baseline_elapsed,
+                        parallel=args.parallel,
+                        verbose=false,
+                        plan=plan)
+                Gremlins.finish_selected_run(prepared, ran)
+            end
         catch e
             elog("ERROR: cold run failed: $e")
             exit(2)
