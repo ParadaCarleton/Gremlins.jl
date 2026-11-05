@@ -245,6 +245,47 @@ end
     end
 end
 
+@testset "WarmEligibility — deleting a module-level statement routes fallback_toplevel_delete" begin
+    src = """
+    module Deletions
+    helper(x) = x + 1
+    function work(x)
+        y = helper(x)
+        return y * 2
+    end
+    end
+    """
+    mktempdir() do d
+        path = joinpath(d, "deletions.jl")
+        write(path, src)
+        sites = discover_file(path; root=d, operators=[OP_STMT_DELETE])
+        # Discovery never deletes a return or a block's last statement, so these two are the sites.
+        top = only(filter(s -> s.original == "helper(x) = x + 1", sites))
+        inner = only(filter(s -> s.original == "y = helper(x)", sites))
+        @test classify_warm_eligibility(top, d) == WarmEligibility(false, fallback_toplevel_delete)
+        # A statement inside a function body runs warm: the function is redefined without it.
+        @test classify_warm_eligibility(inner, d) == WarmEligibility(true, warm_ok)
+    end
+end
+
+@testset "Warm run — a deleted function is not left in the live module" begin
+    sites = discover(joinpath(W_FIXTURE_DIR, "src"); root=W_FIXTURE_DIR,
+        operators=[OP_STMT_DELETE, OP_PLUS_TO_MINUS])
+    deleted_add = only(filter(s -> startswith(s.original, "function add"), sites))
+    flipped_add = only(filter(s -> s.op_id == :arith_plus_minus, sites))
+    everything = CoverageMap(Dict(deleted_add.relpath => Set(1:40)))
+    result = run_mutations_warm(W_FIXTURE_DIR, [deleted_add, flipped_add], everything;
+        baseline_elapsed=10.0, pkg_name="MiniTarget")
+    by_id = Dict(wr.base.site.id => wr for wr in result.warm_results)
+    # Before: warm re-evaluated the module body without `add`, the old method stayed,
+    # and the mutant "survived" while a fresh process killed it (I4 mismatch).
+    @test by_id[deleted_add.id].base.outcome == Gremlins.killed
+    @test by_id[deleted_add.id].fallback_reason == fallback_toplevel_delete
+    @test by_id[flipped_add.id].base.outcome == Gremlins.killed
+    @test by_id[flipped_add.id].fallback_reason == warm_ok
+    @test isempty(result.i4_mismatches)
+end
+
 @testset "WarmEligibility — struct field routes fallback_typedef" begin
     src = """
     struct Threshold
