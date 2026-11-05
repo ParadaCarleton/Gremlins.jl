@@ -178,7 +178,9 @@ end
     finished = Gremlins.finish_selected_run(second, fake_run(second, verdicts))
     @test Dict(r.site.op_id => r.outcome for r in finished.results) == verdicts
 
-    # A changed testset reruns the mutants that run it, and only those.
+    # A changed testset reruns the mutants that run it, and only those. The tree must change
+    # too: the selector is not asked about a tree the verdicts were made on.
+    write(joinpath(dir, "NOTES.md"), "a change outside the sources\n")
     selector.changed = Set(["positives"])
     third = Gremlins.prepare_selected_run(dir, sites, selector)
     @test Set(s.op_id for s in third.pending) == Set([:relop_gt_ge, :arith_mul_div])

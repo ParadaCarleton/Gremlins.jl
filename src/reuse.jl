@@ -194,6 +194,13 @@ function git_snapshot(pkgdir::AbstractString)::Union{String, Nothing}
     end
 end
 
+"""The tree `sha` (a commit) holds, or `nothing` when the repository of `pkgdir` lacks it."""
+function _commit_tree(pkgdir::AbstractString, sha::AbstractString)::Union{String, Nothing}
+    out = IOBuffer()
+    ok = success(pipeline(`git -C $pkgdir rev-parse -q --verify $(sha * "^{tree}")`; stdout = out, stderr = devnull))
+    return ok ? strip(String(take!(out))) : nothing
+end
+
 """Whether `pkgdir`'s repository holds commit `sha`."""
 _commit_exists(pkgdir::AbstractString, sha::AbstractString)::Bool =
     success(pipeline(`git -C $pkgdir cat-file -e $(sha * "^{commit}")`; stdout = devnull, stderr = devnull))
@@ -262,12 +269,15 @@ function prepare_selected_run(
     reused_warm = Set{String}()
     pending = MutationSite[]
     changes = Dict{String, Union{Set{String}, Nothing}}()
+    # Snapshots of one tree made in different seconds are different commits: compare trees.
+    tree = anchor === nothing ? nothing : _commit_tree(pkgdir, anchor)
     for site in sorted
         entry = (store === nothing || fresh) ? nothing : get(store.entries, keys[site.id], nothing)
         if entry !== nothing && entry.outcome in REUSABLE_OUTCOMES && (warm || !entry.warm) &&
            entry.testsets == planned_tests(plan, site) && !isempty(entry.testsets)
             changed = get!(changes, entry.anchor) do
-                entry.anchor == anchor ? Set{String}() : changed_testsets(selector, entry.anchor)
+                same = tree !== nothing && _commit_tree(pkgdir, entry.anchor) == tree
+                same ? Set{String}() : changed_testsets(selector, entry.anchor)
             end
             if changed !== nothing && isdisjoint(entry.testsets, changed)
                 push!(reused, MutantResult(site, entry.outcome, entry.elapsed, ""))
