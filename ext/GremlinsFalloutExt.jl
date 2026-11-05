@@ -9,17 +9,25 @@ using Gremlins: MutationError, MutationSite
 using Fallout
 
 """
-    FalloutSelector(pkgdir; map="test-impact-map.toml", build=true)
+    FalloutSelector(pkgdir; map="test-impact-map.toml", build=true, refresh=true, jobs, timeout=3600, environment=[])
 
 A `TestSelector` that gives a mutant the testsets Fallout selects for the edit the mutant
 makes, and tells which testsets the change from an earlier commit affects.
+
+With `refresh` (the default), the map is first brought up to the working tree
+(`Fallout.refresh_map` at a snapshot commit of it): a coverage map re-runs, under coverage, the
+testsets the changes since its commit reach, `jobs` at a time with `environment` set (what
+`fallout build --env` sets), so selection never trusts coverage of code that has changed. An
+absent map is built statically. Without `refresh`, an absent map is built statically at `HEAD`
+when `build` is set, and a stale map is used as it is.
 """
 struct FalloutSelector <: Gremlins.TestSelector
     root::String
     map_path::String
     editor::Fallout.EditSelector
     all::Vector{String}          # every runnable testset: what an edit Fallout cannot place runs
-    stale::Vector{String}        # testsets the change from the map's commit to now selects
+    stale::Vector{String}        # testsets the change from the map's commit to now reaches
+    refreshed::Union{Nothing, Vector{String}}  # testsets the refresh ran; nothing: no refresh
     warned::Set{String}          # files already reported as outside the map's sources
 end
 
@@ -27,6 +35,10 @@ function FalloutSelector(
     pkgdir::AbstractString;
     map::AbstractString = "test-impact-map.toml",
     build::Bool = true,
+    refresh::Bool = true,
+    jobs::Integer = max(1, Sys.CPU_THREADS),
+    timeout::Integer = 3600,
+    environment::AbstractVector{Pair{String, String}} = Pair{String, String}[],
 )::FalloutSelector
     root = abspath(pkgdir)
     toplevel = try
@@ -41,19 +53,32 @@ function FalloutSelector(
         ))
     end
     map_path = abspath(root, map)
+    refreshed = nothing
+    if refresh
+        snapshot = Gremlins.git_snapshot(root)
+        snapshot === nothing && throw(MutationError("fallout_selector: cannot snapshot the working tree of $root"))
+        refreshed = try
+            Fallout.refresh_map(root, snapshot; map = map_path, jobs = jobs, timeout = timeout,
+                environment = collect(Pair{String, String}, environment))
+        catch e
+            throw(MutationError(
+                "fallout_selector: cannot refresh the test impact map $map_path: $(sprint(showerror, e))",
+            ))
+        end
+    end
     editor = try
-        Fallout.EditSelector(root; map = map_path, build = build)
+        Fallout.EditSelector(root; map = map_path, build = build && !refresh)
     catch e
         throw(MutationError(
             "fallout_selector: cannot use the test impact map $map_path: $(sprint(showerror, e))",
         ))
     end
     stale = try
-        Fallout.testset_names(Fallout.select_testsets(root, editor.map, editor.map.commit, ""))
+        Fallout.affected_testsets(Fallout.select_testsets(root, editor.map, editor.map.commit, ""))
     catch
         String[]
     end
-    return FalloutSelector(root, map_path, editor, Fallout.testset_names(editor), stale, Set{String}())
+    return FalloutSelector(root, map_path, editor, Fallout.testset_names(editor), stale, refreshed, Set{String}())
 end
 
 function Gremlins.selected_tests(
@@ -80,16 +105,6 @@ Gremlins.runner_arguments(selector::FalloutSelector, names::AbstractVector{<:Abs
 
 Gremlins.runner_path(selector::FalloutSelector)::String = selector.editor.map.runner
 
-"""
-Rules that select a testset for any change to a `.jl` file, or for none: a static-analysis
-testset, one whose map coverage is partial, one the map lacks. They say nothing about
-whether this change reaches the testset, and every mutant's plan holds such testsets, so
-counting them would make any edit anywhere invalidate every stored outcome. A testset
-under one of these rules that the change does reach (its code was edited, it runs changed
-code) is still selected by that other rule.
-"""
-const CHANGE_BLIND_RULES = ("static analysis:", "map status is ", "new testset, not in the map")
-
 function Gremlins.changed_testsets(selector::FalloutSelector, anchor::AbstractString)::Union{Set{String}, Nothing}
     # `git gc` prunes old snapshots; such an anchor cannot be judged.
     present = success(pipeline(`git -C $(selector.root) cat-file -e $(anchor * "^{commit}")`; stdout = devnull, stderr = devnull))
@@ -100,19 +115,22 @@ function Gremlins.changed_testsets(selector::FalloutSelector, anchor::AbstractSt
         return nothing   # the anchor commit is gone (pruned), or the tree does not parse
     end
     isempty(selection.full) || return nothing
-    return Set(
-        name for (name, reason) in selection.reasons
-        if !any(startswith(reason, rule) for rule in CHANGE_BLIND_RULES)
-    )
+    # Static-analysis, partial-coverage and unmapped testsets are selected for any `.jl` edit
+    # and sit in every mutant's plan: counting them would let any edit anywhere invalidate
+    # every stored outcome. `affected_testsets` keeps them only when the change reaches them.
+    return Set(Fallout.affected_testsets(selection))
 end
 
 function Gremlins.selector_summary(selector::FalloutSelector)::String
     map = selector.editor.map
     line = "Fallout map $(relpath(selector.map_path, selector.root)) at $(first(map.commit, 12)): " *
         "$(length(selector.all)) testsets, runner $(map.runner)"
+    if selector.refreshed !== nothing
+        line *= "; refreshed to the working tree ($(length(selector.refreshed)) testsets re-run under coverage)"
+    end
     if !isempty(selector.stale)
         line *= "; $(length(selector.stale)) testsets run code changed since the map's commit " *
-            "(their coverage may be out of date: rebuild the map with `fallout build`)"
+            "(their coverage may be out of date: refresh the map, the default, or rebuild it with `fallout build`)"
     end
     return line
 end

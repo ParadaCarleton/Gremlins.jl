@@ -125,6 +125,27 @@ const FALLOUT_OPS = [OP_PLUS_TO_MINUS, OP_MINUS_TO_PLUS, OP_MUL_TO_DIV, OP_GT_TO
     @test Gremlins.changed_testsets(edited_selector, "0"^40) === nothing
 end
 
+@testset "Fallout selector — refreshes the map to the working tree" begin
+    root = fallout_fixture()
+    # An uncommitted edit: twice() now calls add(), which the map, built at HEAD, cannot know.
+    write(joinpath(root, "src", "P.jl"), replace(FALLOUT_PKG, "twice(x) = 2 * x" => "twice(x) = add(x, x)"))
+    sites = discover(joinpath(root, "src"); root = root, operators = [OP_PLUS_TO_MINUS])
+    add_site = only(filter(s -> s.line == 2, sites))
+
+    stale = fallout_selector(root; refresh = false)
+    @test Gremlins.planned_tests(plan_tests(stale, root, [add_site]), add_site) == ["add"]
+    @test occursin("1 testsets run code changed", Gremlins.selector_summary(stale))
+
+    fresh = fallout_selector(root)
+    @test fresh.refreshed == ["twice"]
+    @test Gremlins.planned_tests(plan_tests(fresh, root, [add_site]), add_site) == ["add", "twice"]
+    @test isempty(fresh.stale)
+    @test occursin("refreshed to the working tree (1 testsets re-run", Gremlins.selector_summary(fresh))
+
+    # Nothing changed since: the next selector runs nothing to refresh.
+    @test fallout_selector(root).refreshed == String[]
+end
+
 @testset "Fallout selector — refuses a package below its repository's root" begin
     root = mktempdir()
     fgit(root, "init", "-q")

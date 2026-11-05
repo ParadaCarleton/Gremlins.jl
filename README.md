@@ -100,11 +100,16 @@ Requirements: Fallout.jl in the environment Gremlins runs in (Julia ≥ 1.12), t
 at the root of a git repository, and a runner script that runs the testsets matching a
 regex given as its first argument, as ReTest does (see Fallout's README; with a
 `--suites` map, the runner takes suite paths). For the most precise selection, build a
-coverage map with `fallout build --runner test/<runner>.jl` and rebuild it as the code
-drifts. Gremlins reports how many testsets run code changed since the map's commit.
+coverage map once with `fallout build --runner test/<runner>.jl`.
 
-Caveats: selection trusts the map. A call path added since the map was built is invisible
-until a rebuild, which is Fallout's own blind spot. `--fresh` reruns every mutant. Cold
+**The map stays current.** Before every run, Gremlins brings the map up to the working tree.
+Testsets that the changes since the map's commit reach re-run under coverage, and the others
+keep their coverage (a static map is rebuilt incrementally). A call path you add is therefore
+seen by the next run, not after a manual rebuild. `refresh=false` (CLI `--no-refresh`) uses the
+map as it is and reports how many testsets have stale coverage.
+
+Caveats: coverage comes from one run of each testset, so a branch taken only on some seeds
+is missed (a Fallout blind spot). `--fresh` reruns every mutant. Cold
 runs reuse only cold verdicts: a warm verdict can disagree with a fresh process (see I4),
 so only warm runs reuse warm verdicts, and a warm verdict that I4 contradicts is never
 stored. `--schema` mode does not support selection yet.

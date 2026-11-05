@@ -46,7 +46,7 @@ function changed_testsets end
 function selector_summary end
 
 """
-    fallout_selector(pkgdir; map="test-impact-map.toml", build=true) -> TestSelector
+    fallout_selector(pkgdir; map="test-impact-map.toml", refresh=true, build=true, jobs, timeout, environment) -> TestSelector
 
 Selects tests with Fallout.jl's test impact map: a mutant runs only the testsets that
 Fallout would select for the same edit, and a stored outcome is reused while Fallout finds
@@ -56,8 +56,15 @@ Needs Fallout.jl in the environment Gremlins runs in, loaded with `using Fallout
 package must be the root of a git repository, and its runner script (the map's `runner`,
 default `test/runtests.jl`) must run the testsets that match a regex given as its first
 argument, as ReTest does (or, for a map built with `--suites`, the suite files given as
-arguments). With `build`, an absent map is built statically at `HEAD`, as `fallout select`
-builds one; build a coverage map with `fallout build` for the most precise selection.
+arguments).
+
+With `refresh` (the default) the map is first brought up to the working tree, so selection
+never trusts coverage of code that has changed: a coverage map re-runs, under coverage, only
+the testsets the changes since its commit reach (`jobs` at a time, with `environment` set as
+`fallout build --env` would), and a static map is rebuilt incrementally. An absent map is
+built statically; build a coverage map once with `fallout build` for the most precise
+selection. With `refresh=false`, the map is used as it is (`build` builds an absent one at
+`HEAD`), and the selector reports how many testsets run code changed since its commit.
 """
 function fallout_selector(pkgdir::AbstractString; kwargs...)::TestSelector
     ext = Base.get_extension(@__MODULE__, :GremlinsFalloutExt)

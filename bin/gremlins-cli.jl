@@ -59,6 +59,7 @@ struct ParsedArgs
     parallel::Int               # --parallel N: concurrent mutant execution (cold path only, default 1)
     fallout_map::Union{String, Nothing}  # --fallout / --fallout-map MAP: select tests with Fallout
     fresh::Bool                 # --fresh: ignore stored outcomes (still records new ones)
+    refresh::Bool               # --no-refresh clears: use the Fallout map as it is
 end
 
 """
@@ -82,6 +83,7 @@ function _parse_args(argv::Vector{String})::ParsedArgs
     parallel = 1
     fallout_map = nothing
     fresh = false
+    refresh = true
 
     i = 1
     while i <= length(argv)
@@ -147,6 +149,8 @@ function _parse_args(argv::Vector{String})::ParsedArgs
             fallout_map = argv[i]
         elseif arg == "--fresh"
             fresh = true
+        elseif arg == "--no-refresh"
+            refresh = false
         elseif arg == "--help" || arg == "-h"
             _print_usage()
             exit(0)
@@ -161,9 +165,10 @@ function _parse_args(argv::Vector{String})::ParsedArgs
     (warm && schema) && throw(ArgumentError("--warm and --schema are mutually exclusive"))
     (schema && fallout_map !== nothing) && throw(ArgumentError("--fallout does not support --schema; use --warm"))
     (fresh && fallout_map === nothing) && throw(ArgumentError("--fresh needs --fallout"))
+    (!refresh && fallout_map === nothing) && throw(ArgumentError("--no-refresh needs --fallout"))
 
     return ParsedArgs(pkg, files, test_file, warm, schema, blame, diff, json_out, strong, acceptable, max_sites, indiff_ref, parallel,
-                      fallout_map, fresh)
+                      fallout_map, fresh, refresh)
 end
 
 function _print_usage()
@@ -215,6 +220,10 @@ Options:
                        takes a testset regex (see Fallout's README).
   --fallout-map <map>  As --fallout, with this map (relative to <pkg>)
   --fresh              With --fallout: run every mutant, ignoring stored outcomes
+  --no-refresh         With --fallout: use the map as it is. By default the map is
+                       first brought up to the working tree: the testsets the changes
+                       since its commit reach re-run under coverage (a static map is
+                       rebuilt incrementally), so selection never trusts stale coverage.
   --help               Print this message
 
 Band output (always printed to stdout):
@@ -446,7 +455,7 @@ function main(argv::Vector{String})
     plan = nothing
     if args.fallout_map !== nothing
         prepared = try
-            selector = Gremlins.fallout_selector(pkgdir; map=args.fallout_map)
+            selector = Gremlins.fallout_selector(pkgdir; map=args.fallout_map, refresh=args.refresh)
             Gremlins.prepare_selected_run(pkgdir, sites, selector; warm=args.warm, fresh=args.fresh)
         catch e
             elog("ERROR: --fallout: $(sprint(showerror, e))")

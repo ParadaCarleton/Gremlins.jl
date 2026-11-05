@@ -245,10 +245,14 @@ Static check: returns `WarmEligibility(eligible::Bool, reason::FallbackReason)`.
 Needs Fallout.jl loaded next to Gremlins (`using Gremlins, Fallout`), which enables the
 `GremlinsFalloutExt` extension. See the README section "Fast runs" for requirements.
 
-### `fallout_selector(pkgdir; map="test-impact-map.toml", build=true) -> TestSelector`
+### `fallout_selector(pkgdir; map="test-impact-map.toml", refresh=true, build=true, jobs, timeout=3600, environment=[]) -> TestSelector`
 
-A selector over Fallout's test impact map (relative to `pkgdir`). With `build`, an absent
-map is built statically at `HEAD`, as `fallout select` does. Throws `MutationError` when
+A selector over Fallout's test impact map (relative to `pkgdir`). With `refresh` (the
+default), the map is first brought up to the working tree (`Fallout.refresh_map` at a git
+snapshot of it). Testsets that the changes since the map's commit reach re-run under
+coverage, `jobs` at a time with `environment` set (as `fallout build --env`). A static map
+is rebuilt incrementally, and an absent map is built statically. With `refresh=false` the
+map is used as it is, and `build` builds an absent one at `HEAD`. Throws `MutationError` when
 Fallout is not loaded, the package is not the root of a git repository, or the map
 cannot be read.
 
