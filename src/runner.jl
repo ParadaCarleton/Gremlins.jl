@@ -145,6 +145,10 @@ run is ~205s).
 `est_plain * timeout_multiplier` derivation entirely. Use when you know the exact
 budget needed.
 
+`plan`: a `TestPlan` (see `plan_tests`). Each mutant then runs the plan's runner with
+only the testsets that can detect it, and a mutant the plan gives no testset is
+`no_coverage` without running.
+
 `parallel`: number of concurrent mutant runs (default 1 = sequential). When > 1,
 a pool of `parallel` shadow copies is created SEQUENTIALLY (because
 `_augment_shadow_with_test_deps` is process-global via `Pkg.activate`), then
@@ -168,8 +172,10 @@ function run_mutations(
     mutant_timeout::Union{Float64, Nothing} = nothing,
     parallel::Int                = 1,
     verbose::Bool                = false,
+    plan::Union{TestPlan, Nothing} = nothing,
 )::RunResult
     pkgdir = abspath(pkgdir)
+    test_relpath = plan_test_relpath(plan, test_dir, test_file)
 
     # Establish baseline if not provided
     if isnothing(baseline_elapsed)
@@ -221,11 +227,11 @@ function run_mutations(
         _augment_shadow_with_test_deps(pkgdir, shadow)
 
         try
-            shadow_test_path = joinpath(shadow, test_dir, test_file)
+            shadow_test_path = joinpath(shadow, test_relpath)
 
             for (i, site) in enumerate(sorted_sites)
-                # 1. Coverage check
-                if !is_covered(cmap, site)
+                # 1. Coverage check (line coverage, then the plan's testsets)
+                if !is_covered(cmap, site) || unreachable(plan, site)
                     if verbose
                         println("[gremlins] [$i/$(length(sorted_sites))] $(site.id[1:8])… no_coverage")
                         flush(stdout)
@@ -272,7 +278,8 @@ function run_mutations(
                     apply!(site, shadow_abs_path)
 
                     # 4. Run test subprocess against shadow project
-                    cmd = Cmd([jl, "--startup-file=no", "--project=$shadow", shadow_test_path])
+                    cmd = Cmd([jl, "--startup-file=no", "--project=$shadow", shadow_test_path,
+                               plan_arguments(plan, site)...])
                     exit_code, _ = _run_with_timeout(cmd, derived_timeout)
 
                     if exit_code == :timeout
@@ -363,7 +370,7 @@ function run_mutations(
             @sync begin
                 for (i, site) in enumerate(sorted_sites)
                     # Coverage-skip: classify immediately, no shadow needed.
-                    if !is_covered(cmap, site)
+                    if !is_covered(cmap, site) || unreachable(plan, site)
                         if verbose
                             println("[gremlins] [parallel] [$i/$n_sites] $(site.id[1:8])… no_coverage")
                             flush(stdout)
@@ -386,7 +393,7 @@ function run_mutations(
                         local mutant_t0 = time()
 
                         try
-                            shadow_test_path = joinpath(sh, test_dir, test_file)
+                            shadow_test_path = joinpath(sh, test_relpath)
 
                             # Determine shadow path for this site's source file.
                             real_abs_path = try
@@ -416,7 +423,8 @@ function run_mutations(
                             try
                                 apply!(_site, shadow_abs_path)
 
-                                cmd = Cmd([jl, "--startup-file=no", "--project=$sh", shadow_test_path])
+                                cmd = Cmd([jl, "--startup-file=no", "--project=$sh", shadow_test_path,
+                                           plan_arguments(plan, _site)...])
                                 exit_code, _ = _run_with_timeout(cmd, derived_timeout)
 
                                 if exit_code == :timeout
@@ -506,6 +514,13 @@ sorted by id, then round-robin across files). `nothing` = no cap.
 `files`: restrict to sites whose relpath matches any of these entries. Accepts
 bare filenames, relative paths, and `./`-prefixed paths — same normalization as
 the CLI `--files` flag. `nothing` = all files.
+
+`selector`: a `TestSelector` (e.g. `fallout_selector(pkgdir)`, after `using Fallout`).
+Each mutant then runs only the testsets that can detect it, the baseline runs only
+the testsets some mutant needs, and with `reuse` a mutant keeps its stored outcome
+while the selector finds none of its testsets affected by the change since it was
+recorded (`fresh=true` ignores stored outcomes but still records new ones). Outcomes
+are stored in `<pkgdir>/.gremlins_results.toml`.
 """
 function mutate(
     pkgdir::AbstractString;
@@ -521,6 +536,9 @@ function mutate(
     files::Union{Vector{String}, Nothing} = nothing,
     parallel::Int                 = 1,
     verbose::Bool                 = false,
+    selector::Union{TestSelector, Nothing} = nothing,
+    reuse::Bool                   = true,
+    fresh::Bool                   = false,
 )::RunResult
     pkgdir = abspath(pkgdir)
     verbose && println("[gremlins] Discovering mutations in $(joinpath(pkgdir, src_dir))...")
@@ -539,6 +557,26 @@ function mutate(
     if !isnothing(max_mutants) && length(sites) > max_mutants
         sites = _sample_sites_round_robin(sites, max_mutants)
         verbose && println("[gremlins] Capped to $(length(sites)) sites (max_mutants=$max_mutants)")
+    end
+
+    if !isnothing(selector)
+        prepared = prepare_selected_run(pkgdir, sites, selector; reuse=reuse, fresh=fresh, verbose=verbose)
+        verbose && println("[gremlins] Running baseline on the selected testsets...")
+        baseline_elapsed, cmap = selected_baseline(prepared; timeout=baseline_timeout)
+        verbose && println("[gremlins] Baseline: $(round(baseline_elapsed, digits=2))s  coverage: $cmap")
+        result = if isempty(prepared.pending)
+            RunResult(pkgdir, MutationSite[], MutantResult[], baseline_elapsed, 0.0)
+        else
+            run_mutations(pkgdir, prepared.pending, cmap;
+                baseline_elapsed=baseline_elapsed,
+                timeout_multiplier=timeout_multiplier,
+                coverage_overhead=coverage_overhead,
+                mutant_timeout=mutant_timeout,
+                parallel=parallel,
+                verbose=verbose,
+                plan=prepared.plan)
+        end
+        return finish_selected_run(prepared, result)
     end
 
     verbose && println("[gremlins] Running baseline test suite...")

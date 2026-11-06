@@ -61,7 +61,7 @@ function _make_shadow(pkgdir::AbstractString)::String
 
         for fn in files
             # Skip cache file at package root level
-            if rel_dir == "." && fn == ".gremlins_cache.json"
+            if rel_dir == "." && fn in (".gremlins_cache.json", ".gremlins_results.toml")
                 continue
             end
 

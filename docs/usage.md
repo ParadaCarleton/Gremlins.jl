@@ -240,6 +240,71 @@ Static check: returns `WarmEligibility(eligible::Bool, reason::FallbackReason)`.
 
 ---
 
+## Test selection and reuse (Fallout.jl)
+
+Needs Fallout.jl loaded next to Gremlins (`using Gremlins, Fallout`), which enables the
+`GremlinsFalloutExt` extension. See the README section "Fast runs" for requirements.
+
+### `fallout_selector(pkgdir; map="test-impact-map.toml", refresh=true, build=true, jobs, timeout=3600, environment=[]) -> TestSelector`
+
+A selector over Fallout's test impact map (relative to `pkgdir`). With `refresh` (the
+default), the map is first brought up to the working tree (`Fallout.refresh_map` at a git
+snapshot of it). Testsets that the changes since the map's commit reach re-run under
+coverage, `jobs` at a time with `environment` set (as `fallout build --env`). A static map
+is rebuilt incrementally, and an absent map is built statically. With `refresh=false` the
+map is used as it is, so every mutant also runs the testsets the changes since the map's
+commit reach, and `build` builds an absent one at `HEAD`. Throws `MutationError` when
+Fallout is not loaded, the package is not the root of a git repository, or the map
+cannot be read (or its commit is no longer in the repository).
+
+### `mutate(pkgdir; selector, reuse=true, fresh=false, ...)`, `mutate_warm(pkgdir; selector, reuse=true, fresh=false, ...)`
+
+With `selector`, each mutant runs the map's runner with only the testsets that can detect
+it, a mutant without one is `no_coverage` and not run, and the baseline runs the union of
+the pending mutants' testsets (or nothing). With `reuse`, stored verdicts in
+`<pkgdir>/.gremlins_results.toml` are reused while still valid. `fresh=true` ignores them
+but still records the run's verdicts. `mutate_warm` uses the stored verdicts in place of
+the file-hash cache.
+
+```julia
+using Gremlins, Fallout
+result = mutate_warm("/path/to/MyPkg"; selector=fallout_selector("/path/to/MyPkg"), verbose=true)
+```
+
+### `plan_tests(selector, pkgdir, sites) -> TestPlan`
+
+The testsets of every site. `run_mutations(...; plan)` and `run_mutations_warm(...; plan)`
+run each mutant with its plan's testsets (warm runs set the test script's `ARGS`).
+
+### When a stored verdict is reused
+
+A verdict of `killed`, `survived` or `no_coverage` is reused when all of these hold:
+
+1. The mutant has the same key: file, operator, replacement, text of the enclosing top-level
+   statement, and offset in it. An edit to the statement, comments included, makes a new key.
+2. It plans the same testsets as when it was recorded.
+3. `changed_testsets(selector, anchor)` finds none of them affected by the change from the
+   recorded tree to the working tree. The recorded tree is a commit made through a throwaway
+   index; no ref, index or file changes. Fallout's rules that fire for any edit
+   (static-analysis testsets, partial-coverage testsets, testsets the map lacks) are not
+   counted as changes; the same testsets are counted when the edit reaches them in another
+   way. A changed `Project.toml`/`Manifest.toml`, or a recorded tree that `git gc` has
+   pruned, reruns everything.
+4. For a cold run, the verdict came from the cold path.
+
+`timeout` and `error` are never stored. Neither is a warm verdict that the I4 cold re-run
+contradicted. Each run re-anchors the verdicts it reuses or makes to its own tree. A verdict
+left on an old anchor, for a mutant no later run has seen, expires once `git gc` prunes that
+anchor. Scoped runs (`--files`, `--in-diff`, `max_mutants`) keep the other sites' verdicts.
+Add `.gremlins_results.toml` to `.gitignore`.
+
+### Writing another selector
+
+Subtype `TestSelector` and add methods to `Gremlins.selected_tests(selector, site,
+mutated_text)`, `runner_arguments(selector, names)`, `runner_path(selector)`,
+`changed_testsets(selector, anchor)` and `selector_summary(selector)`. See the
+`TestSelector` docstring.
+
 ## Reports
 
 ### `report(result::RunResult; format=:markdown) -> String`

@@ -702,3 +702,5 @@ maybe("test_testenv.jl")           # #2/#3: test-env deps
 maybe("test_diff.jl")              # #4: unified diff per survivor
 maybe("test_retestitems.jl")       # #5: ReTestItems layout
 maybe("test_parallel.jl")          # #7: parallel execution
+maybe("test_selection.jl")         # Fallout integration: per-mutant test selection + outcome reuse
+maybe("test_fallout.jl")           # Fallout integration, end to end (skipped unless Fallout loads)

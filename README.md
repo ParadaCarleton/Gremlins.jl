@@ -67,6 +67,54 @@ julia --project=path/to/Gremlins bin/gremlins-cli.jl \
 BAND	weak	kill_rate=0.28	killed=7/25
 ```
 
+## Fast runs: test selection with Fallout.jl
+
+Running the whole suite for every mutant is what makes mutation testing slow. With
+[Fallout.jl](https://github.com/ParadaCarleton/Fallout.jl)'s test impact map, Gremlins runs
+each mutant against only the testsets that can detect it, and it skips mutants that are
+already tested:
+
+- **Per-mutant test selection.** A mutant's testsets are the ones Fallout selects for the
+  edit the mutant makes: those that executed the mutated function, plus dispatch, mention
+  and static-analysis rules for signatures, structs and consts. A mutant that no testset
+  reaches is `no_coverage` and never runs. The baseline runs only the testsets that some
+  mutant needs.
+- **Reuse across runs.** Each verdict (killed, survived, no coverage) is stored in
+  `.gremlins_results.toml` with the testsets that produced it and a snapshot of the tree.
+  The next run reuses a verdict when the mutated statement is unchanged and Fallout finds
+  none of its testsets affected by the changes since then. After a small edit, only the
+  mutants whose tests the edit reaches run again. With nothing changed, nothing runs, not
+  even the baseline.
+
+```julia
+using Gremlins, Fallout          # loading Fallout enables Gremlins' Fallout extension
+selector = fallout_selector(".") # reads ./test-impact-map.toml (built statically if absent)
+result = mutate_warm("."; selector)   # or mutate(".", selector=selector)
+```
+
+```bash
+julia --project=path/to/Gremlins bin/gremlins-cli.jl --pkg . --warm --fallout
+```
+
+Requirements: Fallout.jl in the environment Gremlins runs in (Julia ≥ 1.12), the package
+at the root of a git repository, and a runner script that runs the testsets matching a
+regex given as its first argument, as ReTest does (see Fallout's README; with a
+`--suites` map, the runner takes suite paths). For the most precise selection, build a
+coverage map once with `fallout build --runner test/<runner>.jl`.
+
+**The map stays current.** Before every run, Gremlins brings the map up to the working tree.
+Testsets that the changes since the map's commit reach re-run under coverage, and the others
+keep their coverage (a static map is rebuilt incrementally). A call path you add is therefore
+seen by the next run, not after a manual rebuild. `refresh=false` (CLI `--no-refresh`) uses the
+map as it is: every mutant then also runs the testsets the changes since the map's commit reach,
+since their recorded coverage cannot rule the mutant out.
+
+Caveats: coverage comes from one run of each testset, so a branch taken only on some seeds
+is missed (a Fallout blind spot). `--fresh` reruns every mutant. Cold
+runs reuse only cold verdicts: a warm verdict can disagree with a fresh process (see I4),
+so only warm runs reuse warm verdicts, and a warm verdict that I4 contradicts is never
+stored. `--schema` mode does not support selection yet.
+
 ## How it works
 
 1. **Discovery (static)** — JuliaSyntax parses every `.jl` file in `src/` and
