@@ -129,16 +129,22 @@ end
     root = fallout_fixture()
     # An uncommitted edit: twice() now calls add(), which the map, built at HEAD, cannot know.
     write(joinpath(root, "src", "P.jl"), replace(FALLOUT_PKG, "twice(x) = 2 * x" => "twice(x) = add(x, x)"))
-    sites = discover(joinpath(root, "src"); root = root, operators = [OP_PLUS_TO_MINUS])
+    sites = discover(joinpath(root, "src"); root = root, operators = [OP_PLUS_TO_MINUS, OP_LT_TO_LE])
     add_site = only(filter(s -> s.line == 2, sites))
+    clamp_site = only(filter(s -> s.line == 4, sites))
 
+    # Without a refresh, every mutant also runs what the change since the map's commit reaches:
+    # its coverage, recorded before the edit, cannot rule them out.
     stale = fallout_selector(root; refresh = false)
-    @test Gremlins.planned_tests(plan_tests(stale, root, [add_site]), add_site) == ["add"]
+    @test Gremlins.planned_tests(plan_tests(stale, root, [add_site]), add_site) == ["add", "twice"]
+    @test Gremlins.planned_tests(plan_tests(stale, root, [clamp_site]), clamp_site) == ["clamp", "twice"]
     @test occursin("1 testsets run code changed", Gremlins.selector_summary(stale))
 
+    # The refreshed map knows "twice" runs add, and that it does not run clamp01.
     fresh = fallout_selector(root)
     @test fresh.refreshed == ["twice"]
     @test Gremlins.planned_tests(plan_tests(fresh, root, [add_site]), add_site) == ["add", "twice"]
+    @test Gremlins.planned_tests(plan_tests(fresh, root, [clamp_site]), clamp_site) == ["clamp"]
     @test isempty(fresh.stale)
     @test occursin("refreshed to the working tree (1 testsets re-run", Gremlins.selector_summary(fresh))
 

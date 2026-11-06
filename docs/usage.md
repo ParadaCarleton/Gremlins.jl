@@ -252,9 +252,10 @@ default), the map is first brought up to the working tree (`Fallout.refresh_map`
 snapshot of it). Testsets that the changes since the map's commit reach re-run under
 coverage, `jobs` at a time with `environment` set (as `fallout build --env`). A static map
 is rebuilt incrementally, and an absent map is built statically. With `refresh=false` the
-map is used as it is, and `build` builds an absent one at `HEAD`. Throws `MutationError` when
+map is used as it is, so every mutant also runs the testsets the changes since the map's
+commit reach, and `build` builds an absent one at `HEAD`. Throws `MutationError` when
 Fallout is not loaded, the package is not the root of a git repository, or the map
-cannot be read.
+cannot be read (or its commit is no longer in the repository).
 
 ### `mutate(pkgdir; selector, reuse=true, fresh=false, ...)`, `mutate_warm(pkgdir; selector, reuse=true, fresh=false, ...)`
 

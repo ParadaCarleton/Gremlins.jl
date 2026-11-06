@@ -19,7 +19,8 @@ With `refresh` (the default), the map is first brought up to the working tree
 testsets the changes since its commit reach, `jobs` at a time with `environment` set (what
 `fallout build --env` sets), so selection never trusts coverage of code that has changed. An
 absent map is built statically. Without `refresh`, an absent map is built statically at `HEAD`
-when `build` is set, and a stale map is used as it is.
+when `build` is set, and a stale map is used as it is: every mutant then also runs the testsets
+the change since the map's commit reaches, as `fallout select` would.
 """
 struct FalloutSelector <: Gremlins.TestSelector
     root::String
@@ -129,8 +130,8 @@ function Gremlins.selector_summary(selector::FalloutSelector)::String
         line *= "; refreshed to the working tree ($(length(selector.refreshed)) testsets re-run under coverage)"
     end
     if !isempty(selector.stale)
-        line *= "; $(length(selector.stale)) testsets run code changed since the map's commit " *
-            "(their coverage may be out of date: refresh the map, the default, or rebuild it with `fallout build`)"
+        line *= "; $(length(selector.stale)) testsets run code changed since the map's commit, " *
+            "so every mutant runs them (refresh the map, the default, or rebuild it with `fallout build`)"
     end
     return line
 end

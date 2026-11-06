@@ -106,7 +106,8 @@ coverage map once with `fallout build --runner test/<runner>.jl`.
 Testsets that the changes since the map's commit reach re-run under coverage, and the others
 keep their coverage (a static map is rebuilt incrementally). A call path you add is therefore
 seen by the next run, not after a manual rebuild. `refresh=false` (CLI `--no-refresh`) uses the
-map as it is and reports how many testsets have stale coverage.
+map as it is: every mutant then also runs the testsets the changes since the map's commit reach,
+since their recorded coverage cannot rule the mutant out.
 
 Caveats: coverage comes from one run of each testset, so a branch taken only on some seeds
 is missed (a Fallout blind spot). `--fresh` reruns every mutant. Cold
